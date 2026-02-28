@@ -1,0 +1,5 @@
+{
+  "name": "Remindly MVP",
+  "description": "A business appointment reminder system with WhatsApp automation via n8n and AI video generation.",
+  "requestFramePermissions": []
+}
