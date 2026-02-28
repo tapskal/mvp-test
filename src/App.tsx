@@ -12,10 +12,14 @@ import {
   AlertCircle,
   Video,
   Loader2,
-  Plane
+  Plane,
+  Github,
+  Database as DbIcon,
+  Save
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
+import { GitHubStorage, LocalStorageService, GitHubConfig } from './services/storage';
 
 interface Appointment {
   id: number;
@@ -26,11 +30,30 @@ interface Appointment {
   status: 'pending' | 'sent';
 }
 
+interface AppSettings {
+  n8n_webhook_url: string;
+  use_github: boolean;
+  github_token: string;
+  github_repo: string;
+  github_path: string;
+  github_branch: string;
+}
+
+const DEFAULT_SETTINGS: AppSettings = {
+  n8n_webhook_url: '',
+  use_github: false,
+  github_token: '',
+  github_repo: '',
+  github_path: 'remindly-data.json',
+  github_branch: 'main'
+};
+
 export default function App() {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
-  const [n8nUrl, setN8nUrl] = useState('');
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [isAdding, setIsAdding] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
   const [newAppt, setNewAppt] = useState({
     client_name: '',
     phone_number: '',
@@ -47,67 +70,100 @@ export default function App() {
   const [videoStatus, setVideoStatus] = useState('');
 
   useEffect(() => {
-    fetchData();
+    const initialSettings = LocalStorageService.load('remindly_settings', DEFAULT_SETTINGS);
+    setSettings(initialSettings);
+    loadInitialData(initialSettings);
   }, []);
 
-  const fetchData = async () => {
+  const loadInitialData = async (currentSettings: AppSettings) => {
+    setIsLoading(true);
     try {
-      const [apptsRes, settingsRes] = await Promise.all([
-        fetch('/api/appointments'),
-        fetch('/api/settings')
-      ]);
-      const apptsData = await apptsRes.json();
-      const settingsData = await settingsRes.json();
-      setAppointments(apptsData);
-      setN8nUrl(settingsData.n8n_webhook_url || '');
+      if (currentSettings.use_github && currentSettings.github_token && currentSettings.github_repo) {
+        const gh = new GitHubStorage({
+          token: currentSettings.github_token,
+          repo: currentSettings.github_repo,
+          path: currentSettings.github_path,
+          branch: currentSettings.github_branch
+        });
+        const data = await gh.loadData<Appointment[]>([]);
+        setAppointments(data);
+      } else {
+        const data = LocalStorageService.load('remindly_appointments', []);
+        setAppointments(data);
+      }
     } catch (error) {
-      console.error('Error fetching data:', error);
+      console.error('Error loading data:', error);
+      const data = LocalStorageService.load('remindly_appointments', []);
+      setAppointments(data);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleAddAppointment = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const persistData = async (newAppointments: Appointment[]) => {
+    setAppointments(newAppointments);
+    setIsSaving(true);
     try {
-      const res = await fetch('/api/appointments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newAppt)
-      });
-      if (res.ok) {
-        setNewAppt({ client_name: '', phone_number: '', appointment_date: '', appointment_time: '' });
-        setIsAdding(false);
-        fetchData();
+      LocalStorageService.save('remindly_appointments', newAppointments);
+      
+      if (settings.use_github && settings.github_token && settings.github_repo) {
+        const gh = new GitHubStorage({
+          token: settings.github_token,
+          repo: settings.github_repo,
+          path: settings.github_path,
+          branch: settings.github_branch
+        });
+        await gh.saveData(newAppointments);
       }
     } catch (error) {
-      console.error('Error adding appointment:', error);
+      console.error('Error persisting data:', error);
+    } finally {
+      setIsSaving(false);
     }
+  };
+
+  const handleAddAppointment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const appt: Appointment = {
+      ...newAppt,
+      id: Date.now(),
+      status: 'pending'
+    };
+    const updated = [...appointments, appt];
+    await persistData(updated);
+    setNewAppt({ client_name: '', phone_number: '', appointment_date: '', appointment_time: '' });
+    setIsAdding(false);
   };
 
   const handleDelete = async (id: number) => {
-    try {
-      await fetch(`/api/appointments/${id}`, { method: 'DELETE' });
-      fetchData();
-    } catch (error) {
-      console.error('Error deleting:', error);
-    }
+    const updated = appointments.filter(a => a.id !== id);
+    await persistData(updated);
   };
 
   const handleTrigger = async (id: number) => {
+    const appt = appointments.find(a => a.id === id);
+    if (!appt || !settings.n8n_webhook_url) {
+      alert('Missing appointment data or n8n Webhook URL');
+      return;
+    }
+
     setTriggeringIds(prev => new Set(prev).add(id));
     try {
-      const res = await fetch(`/api/trigger-reminder/${id}`, { method: 'POST' });
-      const data = await res.json();
+      const res = await fetch(settings.n8n_webhook_url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(appt)
+      });
       
       if (res.ok) {
-        await fetchData();
+        const updated = appointments.map(a => a.id === id ? { ...a, status: 'sent' as const } : a);
+        await persistData(updated);
       } else {
-        alert(`Error: ${data.error || 'Failed to trigger reminder'}`);
+        alert(`n8n error: ${res.status}`);
       }
     } catch (error) {
       console.error('Error triggering:', error);
-      alert('Network error. Please check your connection.');
+      alert('Network error. Make sure your n8n webhook allows CORS or check your connection.');
     } finally {
       setTriggeringIds(prev => {
         const next = new Set(prev);
@@ -118,16 +174,9 @@ export default function App() {
   };
 
   const saveSettings = async () => {
-    try {
-      await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ n8n_webhook_url: n8nUrl })
-      });
-      alert('Settings saved!');
-    } catch (error) {
-      console.error('Error saving settings:', error);
-    }
+    LocalStorageService.save('remindly_settings', settings);
+    alert('Settings saved locally! Attempting to sync...');
+    await loadInitialData(settings);
   };
 
   const generateAirportVideo = async () => {
@@ -188,7 +237,10 @@ export default function App() {
         {/* Header */}
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight text-slate-900">Remindly</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-3xl font-bold tracking-tight text-slate-900">Remindly</h1>
+              {isSaving && <Loader2 size={16} className="animate-spin text-indigo-400" />}
+            </div>
             <p className="text-slate-500 mt-1">Manage your business appointments and automate reminders.</p>
           </div>
           <div className="flex items-center gap-3">
@@ -212,9 +264,14 @@ export default function App() {
                   <Calendar size={18} className="text-indigo-600" />
                   Upcoming Appointments
                 </h2>
-                <span className="text-xs font-medium bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">
-                  {appointments.length} Total
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    {settings.use_github ? 'GitHub Sync On' : 'Local Storage'}
+                  </span>
+                  <span className="text-xs font-medium bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">
+                    {appointments.length} Total
+                  </span>
+                </div>
               </div>
               
               <div className="divide-y divide-slate-100">
@@ -326,28 +383,94 @@ export default function App() {
               <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-indigo-800 rounded-full blur-3xl opacity-50"></div>
             </div>
 
-            {/* n8n Settings */}
+            {/* GitHub Database Settings */}
             <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-              <div className="flex items-center gap-2 mb-4">
-                <Settings size={18} className="text-slate-400" />
-                <h3 className="font-semibold">Automation Settings</h3>
-              </div>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-500 uppercase mb-1">n8n Webhook URL</label>
-                  <input 
-                    type="text" 
-                    value={n8nUrl}
-                    onChange={(e) => setN8nUrl(e.target.value)}
-                    placeholder="https://n8n.your-domain.com/..."
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                  />
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Github size={18} className="text-slate-900" />
+                  <h3 className="font-semibold">GitHub Database</h3>
                 </div>
+                <input 
+                  type="checkbox" 
+                  checked={settings.use_github}
+                  onChange={(e) => setSettings({...settings, use_github: e.target.checked})}
+                  className="w-4 h-4 accent-indigo-600"
+                />
+              </div>
+              
+              <AnimatePresence>
+                {settings.use_github && (
+                  <motion.div 
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="space-y-3 overflow-hidden"
+                  >
+                    <p className="text-[10px] text-slate-400 leading-tight mb-2">
+                      Store your data in a JSON file in your repo. Requires a Personal Access Token with 'repo' scope.
+                    </p>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Personal Access Token</label>
+                      <input 
+                        type="password" 
+                        value={settings.github_token}
+                        onChange={(e) => setSettings({...settings, github_token: e.target.value})}
+                        placeholder="ghp_..."
+                        className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Repository (owner/repo)</label>
+                      <input 
+                        type="text" 
+                        value={settings.github_repo}
+                        onChange={(e) => setSettings({...settings, github_repo: e.target.value})}
+                        placeholder="username/remindly-data"
+                        className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">File Path</label>
+                        <input 
+                          type="text" 
+                          value={settings.github_path}
+                          onChange={(e) => setSettings({...settings, github_path: e.target.value})}
+                          className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Branch</label>
+                        <input 
+                          type="text" 
+                          value={settings.github_branch}
+                          onChange={(e) => setSettings({...settings, github_branch: e.target.value})}
+                          className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                        />
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              
+              <div className="mt-4 pt-4 border-t border-slate-100">
+                <div className="flex items-center gap-2 mb-3">
+                  <Settings size={16} className="text-slate-400" />
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">n8n Webhook</h4>
+                </div>
+                <input 
+                  type="text" 
+                  value={settings.n8n_webhook_url}
+                  onChange={(e) => setSettings({...settings, n8n_webhook_url: e.target.value})}
+                  placeholder="https://n8n.your-domain.com/..."
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 mb-3"
+                />
                 <button 
                   onClick={saveSettings}
-                  className="w-full bg-slate-900 text-white py-2 rounded-lg text-sm font-medium hover:bg-slate-800 transition-all"
+                  className="w-full flex items-center justify-center gap-2 bg-slate-900 text-white py-2 rounded-lg text-sm font-medium hover:bg-slate-800 transition-all"
                 >
-                  Save Configuration
+                  <Save size={16} />
+                  Save All Settings
                 </button>
               </div>
             </div>
@@ -356,24 +479,24 @@ export default function App() {
             <div className="bg-amber-50 rounded-2xl border border-amber-100 p-6">
               <div className="flex items-center gap-2 mb-3 text-amber-700">
                 <AlertCircle size={18} />
-                <h3 className="font-semibold">MVP Guide</h3>
+                <h3 className="font-semibold text-sm">Deployment Guide</h3>
               </div>
-              <ul className="text-sm text-amber-800 space-y-3">
+              <ul className="text-xs text-amber-800 space-y-3">
                 <li className="flex gap-2">
                   <span className="font-bold">1.</span>
-                  <span>Set up an n8n workflow with a "Webhook" trigger.</span>
+                  <span>Netlify is static. SQLite won't work there.</span>
                 </li>
                 <li className="flex gap-2">
                   <span className="font-bold">2.</span>
-                  <span>Add a "WhatsApp" node (using Twilio or Meta API).</span>
+                  <span>I've enabled **LocalStorage** so it works instantly on Netlify.</span>
                 </li>
                 <li className="flex gap-2">
                   <span className="font-bold">3.</span>
-                  <span>Paste the Webhook URL here in settings.</span>
+                  <span>To sync across devices, enable **GitHub Database** above.</span>
                 </li>
                 <li className="flex gap-2">
                   <span className="font-bold">4.</span>
-                  <span>Click the "Send" icon on any appointment to trigger.</span>
+                  <span>Create a GitHub Token at `github.com/settings/tokens`.</span>
                 </li>
               </ul>
             </div>

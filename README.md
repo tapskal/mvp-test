@@ -9,12 +9,18 @@ A lightweight, full-stack appointment reminder system designed for small busines
 - **AI Video Generation**: Integrated with Google's Veo model to generate cinematic "Airport Coding" videos.
 - **Full-Stack Architecture**: React frontend with an Express/SQLite backend.
 
-## Tech Stack
+## Database Options
 
-- **Frontend**: React 19, Tailwind CSS 4, Lucide Icons, Motion.
-- **Backend**: Node.js, Express, Better-SQLite3.
-- **AI**: Google Gemini API (@google/genai) for video generation.
-- **Automation**: Designed to work with [n8n](https://n8n.io/).
+Since this app is designed to be deployed to static hosting like **Netlify** or **GitHub Pages**, it supports two database modes:
+
+1.  **LocalStorage (Default)**: Data is stored in your browser. It works instantly without any setup but is limited to your current device/browser.
+2.  **GitHub Database (Recommended for Sync)**: Stores your data as a JSON file in your GitHub repository. This allows you to sync your appointments across different devices.
+
+### How to enable GitHub Database:
+1.  Go to **GitHub Settings > Developer Settings > Personal Access Tokens**.
+2.  Generate a new token (classic) with the `repo` scope.
+3.  In the Remindly app, open the **GitHub Database** settings.
+4.  Enter your Token, Repository (e.g., `username/my-repo`), and click **Save**.
 
 ## Getting Started
 
